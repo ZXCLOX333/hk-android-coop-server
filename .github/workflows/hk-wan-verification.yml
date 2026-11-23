@@ -1,0 +1,52 @@
+name: Verify live room from another network
+on:
+  push:
+    branches: [hk-wan-verification]
+permissions:
+  contents: read
+jobs:
+  public-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Join the local tester's room over public WSS
+        run: |
+          node --input-type=module <<'JS'
+          import { WebSocket } from 'ws';
+          const origin = 'https://hk-android-coop.onrender.com';
+          const profile = await fetch(origin + '/profiles', {method: 'POST', body: 'WAN-GitHub', signal: AbortSignal.timeout(20000)});
+          if (profile.status !== 201) throw new Error('Profile HTTP ' + profile.status);
+          const token = await profile.text();
+          const socket = new WebSocket('wss://hk-android-coop.onrender.com/room/N5V2M8K7', {headers: {Authorization: 'Bearer ' + token}});
+          function frame(type, size) {
+            const packet = Buffer.alloc(size);
+            packet.writeUInt32LE(0x504d4b48);
+            packet[4] = 2;
+            packet[5] = type;
+            return packet;
+          }
+          const timer = setTimeout(() => { console.error('Timed out waiting for the local tester'); socket.terminate(); process.exitCode = 1; }, 35000);
+          socket.on('error', error => { clearTimeout(timer); console.error(error.message); process.exitCode = 1; });
+          socket.on('open', () => {
+            const hello = frame(1, 32);
+            hello.write('WAN-GitHub', 8);
+            socket.send(hello);
+          });
+          socket.on('message', packet => {
+            if (packet[5] === 2) {
+              if (packet[8] !== 2) throw new Error('Expected to join as the second player');
+              const chat = frame(10, 160);
+              chat.write('WAN-GITHUB', 32);
+              socket.send(chat);
+              console.log('Joined the same room as player 2.');
+            } else if (packet[5] === 10 && packet[6] === 1 && packet.toString('utf8', 32, 40) === 'WAN-HOST') {
+              const ack = frame(10, 160);
+              ack.write('WAN-DONE', 32);
+              socket.send(ack, () => socket.close());
+              clearTimeout(timer);
+              console.log('Two-way messages received through the production relay.');
+            }
+          });
+          JS
